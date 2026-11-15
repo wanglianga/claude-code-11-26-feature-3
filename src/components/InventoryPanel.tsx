@@ -9,6 +9,7 @@ export default function InventoryPanel() {
     drugs,
     missingConversions,
     packageSpecs,
+    coldQuarantine,
   } = useStore();
 
   const siteName = (id: string) => sites.find((s) => s.id === id)?.name ?? id;
@@ -82,6 +83,45 @@ export default function InventoryPanel() {
           </tbody>
         </table>
       </div>
+
+      <h2 style={{ marginTop: 18 }}>
+        冷链到货隔离区（批准前不进正式库存、不参与调拨）
+        <span className="hint">受影响批次先隔离；仅在冷链核查批准放行后才进入上方正式余量，签收不会自动可用</span>
+      </h2>
+      <table>
+        <thead>
+          <tr>
+            <th>运输/箱体</th>
+            <th>接收点位</th>
+            <th>药品</th>
+            <th>批次</th>
+            <th>效期</th>
+            <th className="num">隔离数量</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {coldQuarantine.map((q) => (
+            <tr key={`${q.shipmentId}-${q.batchId}`} className={q.status === 'isolated' || q.status === 'held' ? 'missing-row' : ''}>
+              <td className="mono">{q.shipmentId} / {q.boxId}</td>
+              <td>{siteName(q.siteId)}</td>
+              <td>{drugName(q.drugCode)}</td>
+              <td className="mono">{q.batchId}</td>
+              <td className="mono">{q.expiry}</td>
+              <td className="num">{q.qtyMin}</td>
+              <td>
+                {q.status === 'released' ? (
+                  <span className="badge ok">已批准进入可用余量</span>
+                ) : q.status === 'held' ? (
+                  <span className="badge danger">复核后继续隔离</span>
+                ) : (
+                  <span className="badge warn">隔离待处置</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
 
       <h2 style={{ marginTop: 18 }}>
         缺换算资料（分开显示，禁止推断临床替代）

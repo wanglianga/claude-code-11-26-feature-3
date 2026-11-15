@@ -7,13 +7,15 @@ import CandidatePanel from './components/CandidatePanel';
 import TransferLifecycle from './components/TransferLifecycle';
 import InventoryPanel from './components/InventoryPanel';
 import EventLog from './components/EventLog';
+import ColdChainPanel from './components/ColdChainPanel';
 
-type Tab = 'gap' | 'candidate' | 'transfer' | 'inventory' | 'events';
+type Tab = 'gap' | 'candidate' | 'transfer' | 'coldchain' | 'inventory' | 'events';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'gap', label: '缺口分析（双情景）' },
   { key: 'candidate', label: '调拨候选' },
   { key: 'transfer', label: '调拨工作台' },
+  { key: 'coldchain', label: '冷链运输核查' },
   { key: 'inventory', label: '库存与换算' },
   { key: 'events', label: '事件日志' },
 ];
@@ -74,6 +76,7 @@ export default function App() {
         {tab === 'gap' && <GapOverview />}
         {tab === 'candidate' && <CandidatePanel />}
         {tab === 'transfer' && <TransferLifecycle />}
+        {tab === 'coldchain' && <ColdChainPanel />}
         {tab === 'inventory' && <InventoryPanel />}
         {tab === 'events' && <EventLog />}
       </main>

@@ -382,3 +382,7 @@ tr.clickable:hover { background: var(--primary-soft); }
 .sticky-col { position: sticky; left: 0; background: inherit; }
 .scroll-x { overflow-x: auto; }
 .mono { font-family: ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace; font-size: 11.5px; }
+
+/* 冷链核查曲线：状态区间与读数点可点击回溯 */
+.cold-seg { cursor: pointer; }
+.cold-seg:hover { stroke-width: 1.5; }

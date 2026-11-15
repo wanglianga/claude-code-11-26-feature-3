@@ -101,3 +101,96 @@ describe('Zustand 工作流端到端', () => {
     expect(s().notice).toContain('只读');
   });
 });
+
+describe('冷链运输核查工作流', () => {
+  beforeEach(() => {
+    s().resetDemo();
+    s().login('planner', 'demo1234');
+  });
+
+  const checkOf = (shipmentId: string) => {
+    const own = s().coldChecks.filter((c) => c.shipmentId === shipmentId);
+    return own[own.length - 1];
+  };
+
+  it('初始三个运输均有待复核项，隔离批次不进入正式库存也不参与候选', () => {
+    expect(checkOf('CC-2001').result.verdict).toBe('pending-review');
+    expect(checkOf('CC-2002').result.verdict).toBe('pending-review');
+    expect(checkOf('CC-2003').result.verdict).toBe('pending-review');
+    // 全部冷链批次先隔离
+    expect(s().coldQuarantine.every((q) => q.status === 'isolated')).toBe(true);
+    // 尚未出现在正式库存
+    expect(s().batches.find((b) => b.id === 'B-CC-CAL-1')).toBeUndefined();
+    expect(s().batches.find((b) => b.id === 'B-CC-EPI-1')).toBeUndefined();
+  });
+
+  it('待复核状态不能直接放行；继续隔离不写正式库存', () => {
+    s().decideColdDisposition('CC-2001', 'release');
+    expect(s().coldDispositions.find((d) => d.shipmentId === 'CC-2001')).toBeUndefined();
+    expect(s().notice).toContain('待复核');
+
+    s().decideColdDisposition('CC-2003', 'quarantine');
+    const line = s().coldQuarantine.find((q) => q.shipmentId === 'CC-2003')!;
+    expect(line.status).toBe('held');
+    expect(s().batches.find((b) => b.id === 'B-CC-EPI-3')).toBeUndefined();
+  });
+
+  it('插入迟报读数生成新检查，CC-2001 未知区间由 120 缩小到 90 分钟且历史检查保留', () => {
+    const before = s().coldChecks.filter((c) => c.shipmentId === 'CC-2001').length;
+    s().insertLateReading();
+    const after = s().coldChecks.filter((c) => c.shipmentId === 'CC-2001');
+    expect(after.length).toBe(before + 1);
+    expect(after[after.length - 1].trigger).toBe('late-upload');
+    expect(after[after.length - 1].result.analysis.unknownMs).toBe(90 * 60_000);
+    expect(after[0].result.analysis.unknownMs).toBe(120 * 60_000); // 原检查不变
+    // 重复插入被忽略
+    s().insertLateReading();
+    expect(s().coldChecks.filter((c) => c.shipmentId === 'CC-2001').length).toBe(after.length);
+  });
+
+  it('校准修订触发重新核验转为可接收，批准放行后批次才进入正式可用余量', () => {
+    // 放行前先确认待复核被闸门拦截
+    s().decideColdDisposition('CC-2002', 'release');
+    expect(s().batches.find((b) => b.id === 'B-CC-CAL-1')).toBeUndefined();
+
+    s().applyCalibration();
+    const chk = checkOf('CC-2002');
+    expect(chk.trigger).toBe('calibration-revision');
+    expect(chk.result.verdict).toBe('acceptable');
+    // 原始读数与修订值都保留
+    expect(s().coldReadings.some((r) => r.id === 'C2-A2')).toBe(true);
+    expect(s().coldReadings.some((r) => r.id === 'C2-A2-FIX')).toBe(true);
+
+    s().decideColdDisposition('CC-2002', 'release');
+    const released = s().batches.find((b) => b.id === 'B-CC-CAL-1' && b.siteId === 'S-B');
+    expect(released?.qtyMin).toBe(15);
+    expect(
+      s().coldQuarantine.find((q) => q.shipmentId === 'CC-2002' && q.batchId === 'B-CC-CAL-1')!.status,
+    ).toBe('released');
+    // 已批准处置保留原记录，重复处置被拒
+    const dispCount = s().coldDispositions.filter((d) => d.shipmentId === 'CC-2002').length;
+    s().decideColdDisposition('CC-2002', 'quarantine');
+    expect(s().coldDispositions.filter((d) => d.shipmentId === 'CC-2002').length).toBe(dispCount);
+    expect(s().notice).toContain('保留原记录');
+  });
+
+  it('同箱多批次放行后逐批进入余量，证据时长不按批次重复累计', () => {
+    // CC-2001 同箱两个批次：先插入迟报，仍为待复核（冲突+越界+90 分钟未知），演示隔离不变
+    s().insertLateReading();
+    expect(checkOf('CC-2001').result.verdict).toBe('pending-review');
+    // 未知时长只有一份，不会因两个批次而翻倍
+    expect(checkOf('CC-2001').result.analysis.unknownMs).toBe(90 * 60_000);
+  });
+
+  it('只读观察员不能插入迟报/校准/处置', () => {
+    s().logout();
+    s().login('viewer', 'view1234');
+    s().insertLateReading();
+    expect(s().lateInserted).toBe(false);
+    expect(s().notice).toContain('只读');
+    s().applyCalibration();
+    expect(s().calibrationApplied).toBe(false);
+    s().decideColdDisposition('CC-2002', 'release');
+    expect(s().coldDispositions).toHaveLength(0);
+  });
+});

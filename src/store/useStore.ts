@@ -23,6 +23,17 @@ import {
   DEMO_START,
   type DemoAccount,
 } from '../data/sampleData';
+import {
+  coldCalibrationRevisions,
+  coldLateReading,
+  coldShipments,
+} from '../data/coldChainData';
+import {
+  createInitialColdState,
+  latestCheck,
+  type ColdState,
+} from './coldChainState';
+import { buildCheck, type ColdCheck, type ColdDisposition } from '../domain/coldchain';
 import type {
   AllocationCandidate,
   Batch,
@@ -88,9 +99,25 @@ interface AppState {
   receiveReturn: (transferId: string, returnId: string) => void;
   stocktake: (siteId: string, adjustments: { batchId: string; newQtyMin: number }[]) => void;
   resetDemo: () => void;
+
+  // 冷链运输核查
+  coldReadings: ColdState['coldReadings'];
+  coldChecks: ColdState['coldChecks'];
+  coldCheckSeq: ColdState['coldCheckSeq'];
+  coldDispositions: ColdState['coldDispositions'];
+  coldQuarantine: ColdState['coldQuarantine'];
+  lateInserted: boolean;
+  calibrationApplied: boolean;
+  /** 插入固定迟报读数：对 CC-2001 生成新检查，未知区间缩小 */
+  insertLateReading: () => void;
+  /** 应用固定校准修订：对 CC-2002 生成新检查，触发受影响运输重新核验 */
+  applyCalibration: () => void;
+  /** 冷链处置：release=批准进入可用余量；quarantine=继续隔离。已批准处置保留原记录 */
+  decideColdDisposition: (shipmentId: string, decision: 'quarantine' | 'release') => void;
 }
 
 const demo = createDemoData();
+const cold0 = createInitialColdState();
 
 function nextId(seq: number, prefix: string): { id: string; seq: number } {
   return { id: `${prefix}-${2000 + seq}`, seq: seq + 1 };
@@ -120,6 +147,15 @@ export const useStore = create<AppState>((set, get) => ({
   expandedKeys: new Set<string>(),
   seq: 1,
   notice: null,
+
+  // 冷链核查初始切片（固定文件 + 初始检查；隔离行暂不进正式库存）
+  coldReadings: cold0.coldReadings,
+  coldChecks: cold0.coldChecks,
+  coldCheckSeq: cold0.coldCheckSeq,
+  coldDispositions: cold0.coldDispositions,
+  coldQuarantine: cold0.coldQuarantine,
+  lateInserted: cold0.lateInserted,
+  calibrationApplied: cold0.calibrationApplied,
 
   login: (username, password) => {
     const acc = demoAccounts.find(
@@ -443,6 +479,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   resetDemo: () => {
     const fresh = createDemoData();
+    const freshCold = createInitialColdState();
     set({
       batches: fresh.batches,
       transfers: fresh.transfers,
@@ -454,7 +491,156 @@ export const useStore = create<AppState>((set, get) => ({
       startDate: DEMO_START,
       horizonDays: 30,
       selectedSiteIds: ['S-CENTRAL', 'S-A', 'S-B', 'S-C'],
-      notice: '演示数据已重置',
+      coldReadings: freshCold.coldReadings,
+      coldChecks: freshCold.coldChecks,
+      coldCheckSeq: freshCold.coldCheckSeq,
+      coldDispositions: freshCold.coldDispositions,
+      coldQuarantine: freshCold.coldQuarantine,
+      lateInserted: false,
+      calibrationApplied: false,
+      notice: '演示数据已重置（含冷链核查状态）',
+    });
+  },
+
+  insertLateReading: () => {
+    const s = get();
+    if (s.user?.role === 'viewer') {
+      set({ notice: '只读观察员不能插入迟报读数' });
+      return;
+    }
+    if (s.lateInserted) {
+      set({ notice: '固定迟报读数已插入，重复插入被忽略（检查任务固定文件）' });
+      return;
+    }
+    const shipment = coldShipments.find((x) => x.id === coldLateReading.shipmentId)!;
+    const nextSeq = (s.coldCheckSeq[shipment.id] ?? 1) + 1;
+    const readings = [...s.coldReadings, { ...coldLateReading }];
+    const check: ColdCheck = buildCheck(
+      shipment,
+      readings,
+      'late-upload',
+      nextSeq,
+      coldLateReading.receivedAt,
+    );
+    set({
+      coldReadings: readings,
+      coldChecks: [...s.coldChecks, check],
+      coldCheckSeq: { ...s.coldCheckSeq, [shipment.id]: nextSeq },
+      lateInserted: true,
+      notice:
+        `已插入迟报读数 ${coldLateReading.id} 并生成新检查 ${check.id}：` +
+        `未知区间由 120 分钟缩小为 90 分钟，原检查保留不变`,
+    });
+  },
+
+  applyCalibration: () => {
+    const s = get();
+    if (s.user?.role === 'viewer') {
+      set({ notice: '只读观察员不能应用校准修订' });
+      return;
+    }
+    if (s.calibrationApplied) {
+      set({ notice: '校准修订已应用，不重复触发（原值与历史检查均保留）' });
+      return;
+    }
+    const shipment = coldShipments.find((x) => x.id === 'CC-2002')!;
+    const nextSeq = (s.coldCheckSeq[shipment.id] ?? 1) + 1;
+    const readings = [...s.coldReadings, ...coldCalibrationRevisions.map((r) => ({ ...r }))];
+    const createdAt = Math.max(...coldCalibrationRevisions.map((r) => r.receivedAt));
+    const check: ColdCheck = buildCheck(
+      shipment,
+      readings,
+      'calibration-revision',
+      nextSeq,
+      createdAt,
+    );
+    set({
+      coldReadings: readings,
+      coldChecks: [...s.coldChecks, check],
+      coldCheckSeq: { ...s.coldCheckSeq, [shipment.id]: nextSeq },
+      calibrationApplied: true,
+      notice:
+        `已应用 ${coldCalibrationRevisions.length} 条校准修订并触发 ${shipment.id} 重新核验（新检查 ${check.id}）：` +
+        `原始读数保留可追溯，结论由待复核转为「${check.result.verdict === 'acceptable' ? '可按流程接收' : '待复核'}」`,
+    });
+  },
+
+  decideColdDisposition: (shipmentId, decision) => {
+    const s = get();
+    if (s.user?.role === 'viewer') {
+      set({ notice: '只读观察员不能批准冷链处置' });
+      return;
+    }
+    if (s.coldDispositions.some((d) => d.shipmentId === shipmentId)) {
+      set({ notice: '该运输已有批准处置，保留原记录；新检查不改变已批准结论' });
+      return;
+    }
+    const check = latestCheck(s.coldChecks, shipmentId);
+    if (!check) {
+      set({ notice: '该运输尚无检查记录，不能处置' });
+      return;
+    }
+    // 流程闸门：最新检查为待复核时不能直接放行进入可用余量，只能继续隔离
+    if (decision === 'release' && check.result.verdict !== 'acceptable') {
+      set({
+        notice: `${shipmentId} 最新检查 ${check.id} 结论为待复核，不能批准放行；请先完成复核或继续隔离`,
+      });
+      return;
+    }
+    const lines = s.coldQuarantine.filter((q) => q.shipmentId === shipmentId);
+    const disposition: ColdDisposition = {
+      shipmentId,
+      checkId: check.id,
+      decision,
+      decidedAt: check.createdAt + 60_000,
+      note:
+        decision === 'release'
+          ? `依据 ${check.id}（${check.result.verdict === 'acceptable' ? '可按流程接收' : '人工复核后放行'}）批准进入可用余量`
+          : `依据 ${check.id} 复核后继续隔离，不进入可用余量、不参与调拨`,
+    };
+
+    let batches = s.batches;
+    let quarantine = s.coldQuarantine;
+    if (decision === 'release') {
+      // 批准后才把隔离量写入正式库存（同箱多批次逐批注入，证据时长不重复累计）
+      for (const line of lines) {
+        const idx = batches.findIndex(
+          (b) => b.id === line.batchId && b.siteId === line.siteId,
+        );
+        if (idx >= 0) {
+          batches = batches.map((b, i) =>
+            i === idx ? { ...b, qtyMin: b.qtyMin + line.qtyMin } : b,
+          );
+        } else {
+          batches = [
+            ...batches,
+            {
+              id: line.batchId,
+              drugCode: line.drugCode,
+              siteId: line.siteId,
+              expiry: line.expiry,
+              qtyMin: line.qtyMin,
+            },
+          ];
+        }
+      }
+      quarantine = quarantine.map((q) =>
+        q.shipmentId === shipmentId ? { ...q, status: 'released' as const } : q,
+      );
+    } else {
+      quarantine = quarantine.map((q) =>
+        q.shipmentId === shipmentId ? { ...q, status: 'held' as const } : q,
+      );
+    }
+
+    set({
+      batches,
+      coldQuarantine: quarantine,
+      coldDispositions: [...s.coldDispositions, disposition],
+      notice:
+        decision === 'release'
+          ? `${shipmentId} 已批准：${lines.length} 个隔离批次进入接收点可用余量（此前不参与任何调拨）`
+          : `${shipmentId} 复核后继续隔离：批次不进入可用余量、不参与调拨`,
     });
   },
 }));
